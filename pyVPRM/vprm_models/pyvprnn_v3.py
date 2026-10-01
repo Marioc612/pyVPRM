@@ -29,7 +29,7 @@ from pyVPRM.vprm_models.pyvprnn_v1 import (
 #     (convective timing/intensity error), so this half uses real measured
 #     precipitation (self.precip_var, "P_F" at training time).
 #
-#   - Seasonal drought memory (a week to ~90 days) is a rolling
+#   - Seasonal drought memory is a rolling
 #     mean/min over a long window - by construction, hour-level timing
 #     error gets smoothed out at that scale, so the source's timing
 #     accuracy barely matters here. This half uses swvl1_era5 instead,
@@ -37,11 +37,7 @@ from pyVPRM.vprm_models.pyvprnn_v1 import (
 #     it's available everywhere, with no upscaling-availability problem at
 #     all (only an accuracy one, and one this design deliberately doesn't
 #     lean on for anything timing-sensitive).
-#
-# UPSCALING NOTE: because of this split, only the SHORT-tau precip features
-# need a bias-corrected gridded precip product off-tower (precip_var must
-# not be the raw tower P_F there). The long-tau swvl1 features need no such
-# bridge - swvl1_era5 was never tower-only to begin with.
+
 # =============================================================================
 
 def apply_snow_gating(precip_values, snow_depth_values, melt_threshold=1e-3):
@@ -159,9 +155,8 @@ class LaggedBatchGenerator(BatchGenerator):
                                     memory) only.
 
     precip_var (constructor arg, default "P_F") is the single place that
-    decides which precipitation source feeds the API family - swap it for
-    a bias-corrected gridded product at upscale time.
-    swvl1_era5-derived features need no equivalent swap.
+    decides which precipitation source feeds the API family - swap it 
+    at upscale time.
 
     UNITS: dt_hours is inferred from ds_cropped's own datetime_utc axis.
     lag_hours (for the Conv1D branch) are real hours, converted to
@@ -285,7 +280,10 @@ class LaggedBatchGenerator(BatchGenerator):
 
         self.y_array = self.ds_cropped[self._target].sel(datetime_utc=self.time).values.astype(np.float32)
         self.y_unc_array = self.ds_cropped[self._unc].sel(datetime_utc=self.time).values.astype(np.float32)
-        self.fp_array = self.ds_cropped["ffp_footprint"].sel(t=self.time).values.astype(np.float32)
+        if "ffp_footprint" in self.ds_cropped.variables:
+            self.fp_array = self.ds_cropped["ffp_footprint"].sel(t=self.time).values.astype(np.float32)
+        else:
+            self.fp_array = None
         self.mask_static = self.ds_cropped["flux_mask"].values.astype(np.float32)
         self.static_stack = np.concatenate([self.nirv_max, self.nirv_min, self.lc], axis=-1)
         self.y_pack = np.stack([self.y_array, self.y_unc_array], axis=-1).astype(np.float32)
@@ -378,6 +376,7 @@ class pyvprnn_v3(pyvprnn_v1):
     def __init__(self, lagged_met_vars=None, lag_hours=None, precip_var=None, **kwargs):
         super().__init__(**kwargs)
 
+        self.sat_vars = ["lswi", "nirv"]
         self.lagged_met_vars = list(lagged_met_vars) if lagged_met_vars is not None else list(self.DEFAULT_LAGGED_MET_VARS)
         self.lag_hours = list(lag_hours) if lag_hours is not None else list(self.DEFAULT_LAG_HOURS)
         self.precip_var = precip_var if precip_var is not None else self.DEFAULT_PRECIP_VAR

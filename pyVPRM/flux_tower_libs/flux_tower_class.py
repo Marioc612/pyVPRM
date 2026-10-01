@@ -808,8 +808,8 @@ class fluxnet_shuttle(flux_tower_data):
             print("Data only available for the following years {}".format(years.tolist()))
             return False
 
-        flux_data.rename(columns={'blh': 'PBLH'}, inplace=True)
-        self.flux_data = flux_data
-        print('PBLS', np.nanmax(flux_data['PBLH']))    
+        if 'blh' in flux_data.columns:
+            flux_data = flux_data.rename(columns={'blh': 'PBLH'})
+        self.flux_data = flux_data  
         return True
 

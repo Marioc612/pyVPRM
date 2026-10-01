@@ -391,7 +391,7 @@ class met_data_handler(met_data_handler_base):
 
         if self.regridded:
             return
-
+            
         self.rearrange_lons_lats()
 
         if self.regridder is None or overwrite_regridder:
@@ -432,7 +432,10 @@ class met_data_handler(met_data_handler_base):
                     # This also forces a network fetch (compute() under the
                     # hood via to_netcdf) -- give it the same retry/reload
                     # treatment as _load_selection().
-                    grid_src = self._compute_with_retry(grid_src)
+                    assert "lat" in grid_src.coords and "lon" in grid_src.coords, list(grid_src.coords)
+                    assert grid_src.sizes["lat"] > 0 and grid_src.sizes["lon"] > 0, dict(grid_src.sizes)
+                    grid_src["lat"].attrs.update(units="degrees_north", standard_name="latitude")
+                    grid_src["lon"].attrs.update(units="degrees_east", standard_name="longitude")
                     grid_src.to_netcdf(src_temp_path)
                     t_ds_out.to_netcdf(dest_temp_path)
 

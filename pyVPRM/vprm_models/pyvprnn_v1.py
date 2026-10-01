@@ -227,6 +227,7 @@ class BatchGenerator(tf.keras.utils.Sequence):
     """
     NOTE on batch tuple shape: __getitem__ returns
     (sat, static, met, sw_in_pot, fp, mask), ypack.
+    fp is None if "ffp_footprint" is not present in ds_cropped.
     """
 
     def __init__(self, ds_cropped, sat_vars, met_vars,
@@ -332,8 +333,14 @@ class BatchGenerator(tf.keras.utils.Sequence):
         self.y_unc_array = self.ds_cropped[self._unc].sel(
             datetime_utc=self.time).values.astype(np.float32)
 
-        self.fp_array = self.ds_cropped["ffp_footprint"].sel(
-            t=self.time).values.astype(np.float32)
+        # FOOTPRINT - optional. Some files don't carry ffp_footprint;
+        # in that case we just skip loading it and return None for it
+        # in every batch.
+        if "ffp_footprint" in self.ds_cropped.variables:
+            self.fp_array = self.ds_cropped["ffp_footprint"].sel(
+                t=self.time).values.astype(np.float32)
+        else:
+            self.fp_array = None
 
         self.mask_static = self.ds_cropped["flux_mask"].values.astype(np.float32)
 
@@ -364,7 +371,7 @@ class BatchGenerator(tf.keras.utils.Sequence):
                 batch_index * self.batch_size: (batch_index + 1) * self.batch_size]
             Xmet = self.met_array[batch_idxs]
             Xsw_in_pot = self.sw_in_pot_array[batch_idxs]
-            fp = self.fp_array[batch_idxs]
+            fp = self.fp_array[batch_idxs] if self.fp_array is not None else None
             ypack = self.y_pack[batch_idxs]
             # Expand only this batch's worth of samples, not the whole record.
             sat = self.sat_array[self.sat_time_index[batch_idxs]]
@@ -379,7 +386,6 @@ class BatchGenerator(tf.keras.utils.Sequence):
                 self._mask_cache_B = B
             mask = self._mask_cache
             return (sat, self._static_cache, Xmet, Xsw_in_pot, fp, mask), ypack
-
 
 class pyvprnn_v1(pyvprnn):
     """
@@ -398,7 +404,7 @@ class pyvprnn_v1(pyvprnn):
         self.train_weights = None
         self.valid_weights = None
 
-        self.sat_vars = ["lswi", "nirv", "ndre"]
+        self.sat_vars = ["lswi", "nirv"] # "ndre"
         self.met_vars = ["t2m", "ssrd", "RH_from_VDP", "swvl1_era5", "swvl2_era5"] # 'sd_era5']
         # GPP excludes swvl1_era5 (kept for Reco's water-availability signal);
         # Reco excludes ssrd (no direct light-driven respiration signal) and

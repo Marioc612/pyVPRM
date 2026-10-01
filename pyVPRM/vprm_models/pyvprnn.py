@@ -56,13 +56,13 @@ class pyvprnn:
     def set_ds(self, ds):
         self.ds = ds
     
-    def prepare_base_dataset(self, nee_qc_flags=[0], opath=None,
+    def prepare_base_dataset(self, nee_qc_flags=[0,1,2,3], opath=None,
                              mass_fraction_threshold=0.925,
                             chunks_t=256):
     
 
         log_mem('Beginning')
-        if (not self.ds.chunks) and (not chunks_t == False):
+        if not self.ds.chunks and chunks_t is not False and "t" in self.ds.dims:
             self.ds = self.ds.chunk({"t": chunks_t})
         ds = self.ds  # work on local reference
     
@@ -92,42 +92,35 @@ class pyvprnn:
         log_mem('Cropped')
     
         ds_cropped = self.ds_cropped
-    
-        spatial_sum = ds_cropped["ffp_footprint"].sum(dim=["x", "y"])
-        ds_cropped["ffp_footprint"] = ds_cropped["ffp_footprint"] / spatial_sum
-    
-        valid_footprint_mask = (
-            ds_cropped["ffp_footprint"].sum(dim=["x", "y"], skipna=True) != 0
-        )
 
-        qc_mask = ds_cropped["NEE_VUT_REF_QC"].isin(nee_qc_flags)
+        qc_mask = ds_cropped["NEE_VUT_REF_QC"].isin(nee_qc_flags).compute()
+        qc_times = ds_cropped["datetime_utc"].values[qc_mask.values]
         
-        qc_mask = qc_mask.compute()  
-        valid_times = ds_cropped["datetime_utc"].where(qc_mask, drop=True)
-        ds_cropped = ds_cropped.sel(datetime_utc=valid_times)
-
-        valid_fp = ds_cropped["ffp_footprint"]
+        if "ffp_footprint" in ds_cropped.data_vars:
+            fp = ds_cropped["ffp_footprint"]
+            spatial_sum = fp.sum(dim=["x", "y"], skipna=True).compute()
         
-        mask = valid_footprint_mask.compute()
-        fp_times = ds_cropped["t"].values[mask.values]        
-    
-        common_times = valid_times.sel(
-            datetime_utc=valid_times.isin(fp_times)
-        )
-    
-        footprint_sum = (
-            ds_cropped["ffp_footprint"]
-            .sel(t=common_times)
-            .sum(dim=["x", "y"])
-        ).compute()
+            # normalize; empty footprints become NaN instead of 0/0 warnings
+            ds_cropped["ffp_footprint"] = fp / spatial_sum.where(spatial_sum > 0)
         
-        common_times = common_times.where(footprint_sum > 1e-5, drop=True)
-        self.common_times = np.sort(pd.to_datetime(common_times.values))
+            # footprint valid if its raw sum exceeds threshold
+            fp_valid = (spatial_sum > 1e-5).values
+            fp_times = ds_cropped["t"].values[fp_valid]
+        
+            common_times = np.intersect1d(qc_times, fp_times)  # sorted, unique
+        else:
+            common_times = np.unique(qc_times)  # sorted, unique
+        
+        self.common_times = pd.to_datetime(common_times)
         if self.lag_window > 0:
             self.common_times = self.common_times[self.lag_window:]
-    
-        self.ds_cropped = ds_cropped.sel(datetime_utc=self.common_times)
-        self.ds_cropped = self.ds_cropped.sel(t=self.common_times)
+        
+        indexers = {
+            dim: self.common_times
+            for dim in ("datetime_utc", "t")
+            if dim in ds_cropped.indexes
+        }
+        self.ds_cropped = ds_cropped.sel(indexers)
     
         counts = pd.Series(self.common_times).dt.year.value_counts().sort_index()
         print("Valid times per year:", counts)
@@ -595,32 +588,33 @@ class pyvprnn:
             days_since_t0=(
                 "datetime_utc",
                 ((self.ds.datetime_utc.data - t0) / np.timedelta64(1, "D")).astype(int)))
-        
-        mask = ((self.ds["ZL"] > -1000) & (self.ds["ZL"] < 1000))
-        
-        footprint_timestamps = (
-            self.ds["datetime_utc"]
-            .where(mask, drop=True))
 
-        print('Calculates footprints for {}/{} timestamps'.format(len(footprint_timestamps),
-                                                                  len(self.ds.datetime_utc.data)))
-
-        self.ffp_handler.set_timestamps(footprint_timestamps[:1])
-        self.ffp_handler.make_calculation_grid()
-        self.ffp_handler.calculate_footprints()
-        
-        self.ffp_handler.build_regridder(vprm_pre.sat_imgs.sat_img, base_path)
-        
-        footprints = []
-        for i, chunk_of_timestamps in enumerate(np.array_split(footprint_timestamps, n_chunks)):
-            print(i)
-            self.ffp_handler.set_timestamps(chunk_of_timestamps)
+        if self.ffp_handler is not None:
+            mask = ((self.ds["ZL"] > -1000) & (self.ds["ZL"] < 1000))
+            
+            footprint_timestamps = (
+                self.ds["datetime_utc"]
+                .where(mask, drop=True))
+    
+            print('Calculates footprints for {}/{} timestamps'.format(len(footprint_timestamps),
+                                                                      len(self.ds.datetime_utc.data)))
+    
+            self.ffp_handler.set_timestamps(footprint_timestamps[:1])
             self.ffp_handler.make_calculation_grid()
             self.ffp_handler.calculate_footprints()
-            self.ffp_handler.apply_regridder()
-            footprints.append(self.ffp_handler.footprint_on_satellite_grid['footprint'].astype("float32"))
+            
+            self.ffp_handler.build_regridder(vprm_pre.sat_imgs.sat_img, base_path)
+            
+            footprints = []
+            for i, chunk_of_timestamps in enumerate(np.array_split(footprint_timestamps, n_chunks)):
+                print(i)
+                self.ffp_handler.set_timestamps(chunk_of_timestamps)
+                self.ffp_handler.make_calculation_grid()
+                self.ffp_handler.calculate_footprints()
+                self.ffp_handler.apply_regridder()
+                footprints.append(self.ffp_handler.footprint_on_satellite_grid['footprint'].astype("float32"))
         
-        self.ds['ffp_footprint'] = xr.concat(footprints, dim='t')
+            self.ds['ffp_footprint'] = xr.concat(footprints, dim='t')
         self.ds['land_cover_map'] = self.vprm_pre.land_cover_type.sat_img
         
         for attempt in range(max_attempts):
@@ -648,16 +642,28 @@ class pyvprnn:
             self.ds[key+'_era5'] = self.era5_inst.ds_out[key].sel({'valid_time': self.ds['datetime_utc']}, method='nearest')
             
         sat_vars = ['lswi','evi', 'nirv', 'ndre']
+        sat_vars = [v for v in sat_vars if v in self.ds]
+        
         self.ds[sat_vars] = (
             self.ds[sat_vars]
             .fillna(0.0))
-        self.ds["ffp_footprint"] = self.ds["ffp_footprint"].fillna(0.0)
+        if self.ffp_handler is not None:
+            self.ds["ffp_footprint"] = self.ds["ffp_footprint"].fillna(0.0)
         self.ds.attrs["crs"] = self.ds.attrs["crs"].to_wkt()
         self.ds.attrs["site"] = flux_tower.site_name
         self.ds.attrs["site_lat"] = flux_tower.lat    
-        self.ds.attrs["site_lon"] = flux_tower.lon  
+        self.ds.attrs["site_lon"] = flux_tower.lon 
+        print('Last print')
+        print(save)
+        print(self.ffp_handler)
         if save:
-            self.ds.to_netcdf(os.path.join(base_path, 'out.nc'))
+            if self.ffp_handler is not None:
+                print('test1')
+                print(self.ffp_handler)
+                self.ds.to_netcdf(os.path.join(base_path, 'out.nc'))
+            else:
+                print('test2')
+                self.ds.to_netcdf(os.path.join(base_path, 'out_no_footprint.nc'))
         return
 
     def crop_to_mass_fraction(
